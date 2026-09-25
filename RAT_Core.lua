@@ -1,5 +1,5 @@
 local ADDON_NAME = ...
-local RAT = { VERSION = "0.2.0", NAME = "Raid Activity Tracker" }
+local RAT = { VERSION = "1.0.0", NAME = "Raid Activity Tracker" }
 _G.RAT = RAT
 
 RAT.PACK_IDLE_END_AFTER = 6

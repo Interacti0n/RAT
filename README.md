@@ -17,12 +17,25 @@ period adds nothing. A resurrected player receives 30 seconds before
 inactivity can start again. Pet-only activity never credits the owner. Dead
 and offline time is excluded. These three limits can be changed from 1 to 120
 seconds using the Settings button or slash commands.
+Changes apply when starting or resetting a session. Each new session saves its
+own limits, so historical reports keep the original measurement settings. Older
+records without saved limits are explicitly marked as unknown.
 
 Open the report with `/rat` or the minimap button. Click a player for the
 recorded inactivity intervals. The report includes eligible trash time, idle
 time and percentage, longest idle interval, and number of packs observed for
 that player. Use `Previous` and `Next` for saved sessions. `Export` opens a
 selectable report that can be copied; RAT never posts it to group chat.
+Live reports and exports include the current pack in their totals and label it
+as in progress. Click a column heading to sort; click it again to reverse the
+order. Window position and sorting are saved across reloads.
+
+`Pack details` shows each pack's duration and each player's eligible and idle
+time, including a snapshot of the current pack. The latest 200 pack details per
+session are retained; dropping older details does not change session totals.
+Pack details are collected from version 1.0.1 onward. `CSV` opens a copyable
+comma-separated report with raw seconds, session limits and warning fields.
+Save the copied text as a UTF-8 `.csv` file to open it in a spreadsheet.
 
 Commands:
 
@@ -30,8 +43,10 @@ Commands:
 - `/rat start`, `/rat stop`, `/rat reset` — control the session
 - `/rat settings` — open the settings window
 - `/rat join N`, `/rat gap N`, `/rat revive N` — change limits in seconds
-- `/rat sort percent`, `/rat sort idle`, `/rat sort name` — sort the table
+- `/rat sort percent|idle|name|eligible|longest|packs` — sort the table
 - `/rat export` — open a copyable report
+- `/rat csv` — open a copyable CSV report
+- `/rat packs` — show pack details
 - `/rat minimap` — show or hide the minimap button
 - `/rat help` — show command summary
 
@@ -40,3 +55,16 @@ appears in combat are marked in the report. Combat-log visibility depends on
 the observer's client, so the report is an estimate rather than proof that a
 player was inactive. Boss detection can still depend on the server providing
 encounter or boss-unit information.
+
+## Development checks
+
+Run with Lua 5.1 from the addon directory:
+
+```
+lua tests/core_spec.lua
+lua tests/regression_spec.lua
+lua tests/ui_spec.lua
+```
+
+These checks simulate combat and UI callbacks. Actual client rendering and
+server-specific encounter events still need testing in WoW 5.4.8.

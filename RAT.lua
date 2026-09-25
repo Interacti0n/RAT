@@ -11,6 +11,8 @@ frame:RegisterEvent("ENCOUNTER_START")
 frame:RegisterEvent("ENCOUNTER_END")
 frame:RegisterEvent("PLAYER_ALIVE")
 frame:RegisterEvent("PLAYER_UNGHOST")
+frame:RegisterEvent("UNIT_CONNECTION")
+frame:RegisterEvent("PLAYER_LOGOUT")
 
 frame:SetScript("OnEvent", function(_, event, ...)
     if event == "ADDON_LOADED" then
@@ -20,10 +22,12 @@ frame:SetScript("OnEvent", function(_, event, ...)
             RAT:BuildFrame()
             RAT:CreateMinimapButton()
         elseif addon == "ElvUI" then RAT:TrySkinElvUI() end
+    elseif event == "PLAYER_LOGOUT" then
+        if RAT.packStartedAt then RAT:EndTrashPack(RAT.lastEvidenceAt, "logout/reload") end
     elseif event == "PLAYER_ENTERING_WORLD" or event == "ZONE_CHANGED_NEW_AREA" then
         RAT:UpdateAutomaticSession()
         RAT:TrySkinElvUI()
-    elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ALIVE" or event == "PLAYER_UNGHOST" then
+    elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ALIVE" or event == "PLAYER_UNGHOST" or event == "UNIT_CONNECTION" then
         RAT:RefreshRoster()
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
         RAT:CombatLog(...)
@@ -51,7 +55,7 @@ SlashCmdList.RAT = function(raw)
     if key then
         local setting = ({ join = "joinGrace", gap = "activeGap", revive = "reviveGrace" })[key]
         if RAT:SetSetting(setting, value) then
-            RAT:Notify(key .. " grace/limit set to " .. value .. "s.")
+            RAT:Notify(key .. " grace/limit set to " .. value .. "s for the next session or reset.")
         else
             RAT:Notify("Choose a whole number from 1 to 120 seconds.")
         end
@@ -73,14 +77,16 @@ SlashCmdList.RAT = function(raw)
             RAT:GetSetting("joinGrace"), RAT:GetSetting("activeGap"), RAT:GetSetting("reviveGrace")))
     elseif command == "export" then
         RAT:ShowExport()
+    elseif command == "csv" then
+        RAT:ShowCSV()
+    elseif command == "packs" then
+        RAT:ShowPackDetails()
     elseif command:match("^sort%s+") then
         local sort = command:match("^sort%s+(%a+)$")
-        if sort == "percent" or sort == "idle" or sort == "name" then
-            RAT.sortBy = sort
-            RAT:RefreshUI()
+        if RAT:SetSort(sort) then
             RAT:Notify("Sort: " .. sort .. ".")
-        else RAT:Notify("Use /rat sort percent, idle or name.") end
+        else RAT:Notify("Use /rat sort percent, idle, name, eligible, longest or packs.") end
     elseif command == "help" then
-        RAT:Notify("/rat | start | stop | reset | minimap | settings | join N | gap N | revive N | sort percent/idle/name | export")
+        RAT:Notify("/rat | start | stop | reset | minimap | settings | join N | gap N | revive N | sort percent/idle/name/eligible/longest/packs | export | csv | packs")
     else RAT:Toggle() end
 end

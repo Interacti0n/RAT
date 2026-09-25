@@ -1,5 +1,5 @@
 local ADDON_NAME = ...
-local RAT = { VERSION = "1.0.0", NAME = "Raid Activity Tracker" }
+local RAT = { VERSION = "1.0.1", NAME = "Raid Activity Tracker" }
 _G.RAT = RAT
 
 RAT.PACK_IDLE_END_AFTER = 6
@@ -8,10 +8,32 @@ RAT.AUTO_EXIT_GRACE = 30
 RAT.RETENTION_SECONDS = 14 * 24 * 60 * 60
 RAT.DEFAULT_SETTINGS = { joinGrace = 15, activeGap = 7, reviveGrace = 30 }
 RAT.MAX_IDLE_SEGMENTS = 250
+RAT.MAX_PACK_DETAILS = 200
 
 function RAT:GetSetting(key)
     local settings = RAT_DB and RAT_DB.settings
     return settings and settings[key] or self.DEFAULT_SETTINGS[key]
+end
+
+function RAT:CaptureSettings()
+    local settings = {}
+    for key in pairs(self.DEFAULT_SETTINGS) do settings[key] = self:GetSetting(key) end
+    return settings
+end
+
+function RAT:GetSessionSetting(key)
+    local settings = self.activeSession and self.activeSession.settings
+    return settings and settings[key] or self:GetSetting(key)
+end
+
+function RAT:SetSort(key, toggle)
+    if not ({name=true, eligible=true, idle=true, percent=true, longest=true, packs=true})[key] then return false end
+    local ui = RAT_DB.ui
+    if toggle and ui.sortBy == key then ui.sortAscending = not ui.sortAscending
+    else ui.sortAscending = key == "name" end
+    ui.sortBy, self.sortBy = key, key
+    if self.RefreshUI then self:RefreshUI() end
+    return true
 end
 
 function RAT:SetSetting(key, value)
@@ -101,6 +123,8 @@ function RAT:InitDB()
     if type(RAT_DB.minimap.angle) ~= "number" then RAT_DB.minimap.angle = 225 end
     RAT_DB.minimap.hide = RAT_DB.minimap.hide == true
     RAT_DB.settings = type(RAT_DB.settings) == "table" and RAT_DB.settings or {}
+    RAT_DB.ui = type(RAT_DB.ui) == "table" and RAT_DB.ui or {}
+    self.sortBy = RAT_DB.ui.sortBy or "percent"
     for key, default in pairs(self.DEFAULT_SETTINGS) do
         local value = tonumber(RAT_DB.settings[key])
         RAT_DB.settings[key] = value and value >= 1 and value <= 120 and value == math.floor(value) and value or default
@@ -117,6 +141,10 @@ function RAT:InitDB()
         self.activeSession.members = type(self.activeSession.members) == "table" and self.activeSession.members or {}
         self.activeSession.warnings = type(self.activeSession.warnings) == "table" and self.activeSession.warnings or {}
         self.activeSession.warnings.reload = true
+        if not self.activeSession.settings then
+            self.activeSession.settings = self:CaptureSettings()
+            self.activeSession.warnings.settingsUnknown = true
+        end
         self:ResetRuntimePack()
     else
         RAT_DB.activeSession = nil
@@ -135,16 +163,24 @@ function RAT:RefreshRoster()
             if fullName then
                 local member = EnsureMember(session, fullName, shortName, unit)
                 local wasDead = member.dead == true
+                local wasEligible = self:MemberEligible(member)
                 seen[fullName] = true
                 member.online = not UnitIsConnected or SafeCall(UnitIsConnected, unit) ~= false
                 member.dead = UnitIsDeadOrGhost and SafeCall(UnitIsDeadOrGhost, unit) == true or false
                 member.lastSeenAt = WallTime()
+                if self:MemberEligible(member) and not wasEligible then
+                    member.eligibleSince = GetTime()
+                    if self.packStartedAt then
+                        self.activityAt[fullName], self.idleCredited[fullName] = GetTime(), nil
+                        self.activeIdleSegment[fullName] = nil
+                    end
+                end
                 if wasDead and not member.dead then
                     local now = GetTime()
                     self.revivedAt = self.revivedAt or {}
                     self.revivedAt[fullName] = now
                     if self.packStartedAt then
-                        self.reviveGraceUntil[fullName] = now + self:GetSetting("reviveGrace")
+                        self.reviveGraceUntil[fullName] = now + self:GetSessionSetting("reviveGrace")
                         self.hasParticipated[fullName] = true
                         self.activityAt[fullName], self.idleCredited[fullName] = now, nil
                         self.activeIdleSegment[fullName] = nil
@@ -154,6 +190,8 @@ function RAT:RefreshRoster()
                     self.activityAt[fullName] = GetTime()
                 end
                 if self.packStartedAt and self.packInitialized and not self.packMembers[fullName] then
+                    self:SavePackBaseline(fullName, member)
+                    member.eligibleSince = GetTime()
                     self.packMembers[fullName] = true
                     member.packs = (member.packs or 0) + 1
                 end
@@ -178,9 +216,10 @@ function RAT:StartSession(manual)
     local now = WallTime()
     if not isRaid then self.encounterActive = false end
     local session = {
-        version = 1, startedAt = now, instanceKey = key, instance = name,
+        version = 2, startedAt = now, instanceKey = key, instance = name,
         difficulty = difficulty, automatic = not manual, members = {},
         trashPacks = 0, trashCombatSeconds = 0, warnings = {},
+        settings = self:CaptureSettings(), packDetails = {},
     }
     self.activeSession, RAT_DB.activeSession = session, session
     self.revivedAt = {}
@@ -218,8 +257,10 @@ function RAT:ResetCurrentSession()
     if not session then return false end
     if self.packStartedAt then self:EndTrashPack(self.lastEvidenceAt or GetTime()) end
     session.startedAt = WallTime()
+    session.version = 2
     session.trashPacks, session.trashCombatSeconds = 0, 0
     session.warnings = {}
+    session.settings, session.packDetails, session.omittedPacks = self:CaptureSettings(), {}, 0
     for _, member in pairs(session.members) do
         member.trashEligibleSeconds, member.trashIdleSeconds = 0, 0
         member.longestIdleSeconds, member.packs = 0, 0
@@ -239,6 +280,7 @@ function RAT:ResetRuntimePack()
     self.hasParticipated, self.reviveGraceUntil = {}, {}
     self.activeIdleSegment = {}
     self.packMembers, self.packInitialized = {}, false
+    self.packBaseline, self.packWallStartedAt = {}, nil
     self.encounterActive = encounterWasActive or
         (IsEncounterInProgress and SafeCall(IsEncounterInProgress) == true or false)
 end
@@ -246,6 +288,7 @@ end
 function RAT:StartTrashPack(enemyGUID)
     if not self.activeSession or self.encounterActive or self.packStartedAt then return end
     local now = GetTime()
+    self.packBaseline, self.packWallStartedAt = {}, WallTime()
     self.packStartedAt, self.lastTickAt, self.lastEvidenceAt = now, now, now
     self.allEnemiesDeadAt, self.trackedEnemies, self.petOwners = nil, {}, {}
     if enemyGUID then self.trackedEnemies[enemyGUID] = true end
@@ -256,10 +299,12 @@ function RAT:StartTrashPack(enemyGUID)
     self:RefreshRoster()
     for fullName, member in pairs(self.activeSession.members) do
         if member.unit then
+            self:SavePackBaseline(fullName, member)
+            member.eligibleSince = now
             self.activityAt[fullName] = now
             local revived = self.revivedAt and self.revivedAt[fullName]
-            if revived and now - revived < self:GetSetting("reviveGrace") then
-                self.reviveGraceUntil[fullName] = revived + self:GetSetting("reviveGrace")
+            if revived and now - revived < self:GetSessionSetting("reviveGrace") then
+                self.reviveGraceUntil[fullName] = revived + self:GetSessionSetting("reviveGrace")
                 self.hasParticipated[fullName] = true
             else
                 self.hasParticipated[fullName] = false
@@ -289,7 +334,7 @@ function RAT:CreditIdle(fullName, member, now, requireEligible)
     local intervalStart = graceUntil and math.max(lastActivity, graceUntil) or lastActivity
     local interval = math.max(0, now - intervalStart)
     local threshold = self.hasParticipated and self.hasParticipated[fullName] and
-        self:GetSetting("activeGap") or self:GetSetting("joinGrace")
+        self:GetSessionSetting("activeGap") or self:GetSessionSetting("joinGrace")
     if interval < threshold then return end
     local credited = self.idleCredited[fullName] or 0
     member.trashIdleSeconds = (member.trashIdleSeconds or 0) + math.max(0, interval - credited)
@@ -302,22 +347,23 @@ function RAT:CreditIdle(fullName, member, now, requireEligible)
             table.remove(member.idleSegments, 1)
             member.omittedSegments = (member.omittedSegments or 0) + 1
         end
-        segment = { startedAt = WallTime() - interval, seconds = 0,
+        segment = { startedAt = WallTime() - (GetTime() - now) - interval, seconds = 0,
             pack = (self.activeSession.trashPacks or 0) + 1 }
         member.idleSegments[#member.idleSegments + 1] = segment
         self.activeIdleSegment[fullName] = segment
     end
     segment.seconds = interval
-    segment.endedAt = WallTime()
+    segment.endedAt = WallTime() - (GetTime() - now)
 end
 
 function RAT:Accumulate(now)
     if not self.activeSession or not self.packStartedAt or self.encounterActive then return end
     now = math.min(tonumber(now) or GetTime(), self.lastEvidenceAt or GetTime())
-    local delta = math.max(0, now - (self.lastTickAt or now))
+    local previous = self.lastTickAt or now
     self.lastTickAt = now
     for fullName, member in pairs(self.activeSession.members) do
         if self:MemberEligible(member) then
+            local delta = math.max(0, now - math.max(previous, member.eligibleSince or previous))
             member.trashEligibleSeconds = (member.trashEligibleSeconds or 0) + delta
             self:CreditIdle(fullName, member, now, false)
         else
@@ -326,6 +372,35 @@ function RAT:Accumulate(now)
             self.activeIdleSegment[fullName] = nil
         end
     end
+end
+
+function RAT:SavePackBaseline(key, member)
+    self.packBaseline[key] = { eligible = member.trashEligibleSeconds or 0, idle = member.trashIdleSeconds or 0 }
+end
+
+function RAT:GetCurrentPack(endedAt)
+    if not self.packStartedAt then return nil end
+    local pack = { number = (self.activeSession.trashPacks or 0) + 1,
+        startedAt = self.packWallStartedAt, members = {},
+        seconds = math.max(0, (endedAt or self.lastEvidenceAt or self.packStartedAt) - self.packStartedAt) }
+    for key, baseline in pairs(self.packBaseline) do
+        local member = self.activeSession.members[key]
+        if member then
+            pack.members[key] = { eligible = math.max(0, (member.trashEligibleSeconds or 0) - baseline.eligible),
+                idle = math.max(0, (member.trashIdleSeconds or 0) - baseline.idle) }
+        end
+    end
+    return pack
+end
+
+function RAT:GetSessionTotals(session)
+    local packs, seconds = session.trashPacks or 0, session.trashCombatSeconds or 0
+    local running = session == self.activeSession and self.packStartedAt ~= nil
+    if running then
+        packs = packs + 1
+        seconds = seconds + math.max(0, (self.lastEvidenceAt or self.packStartedAt) - self.packStartedAt)
+    end
+    return packs, seconds, running
 end
 
 function RAT:EndTrashPack(endedAt, reason)
@@ -341,6 +416,15 @@ function RAT:EndTrashPack(endedAt, reason)
     end
     endedAt = math.max(self.packStartedAt, tonumber(endedAt) or self.lastEvidenceAt or GetTime())
     self:Accumulate(endedAt)
+    local details = self.activeSession.packDetails or {}
+    self.activeSession.packDetails = details
+    if #details >= self.MAX_PACK_DETAILS then
+        table.remove(details, 1)
+        self.activeSession.omittedPacks = (self.activeSession.omittedPacks or 0) + 1
+    end
+    local pack = self:GetCurrentPack(endedAt)
+    pack.reason = reason or "ended"
+    details[#details + 1] = pack
     self.activeSession.trashPacks = (self.activeSession.trashPacks or 0) + 1
     self.activeSession.trashCombatSeconds = (self.activeSession.trashCombatSeconds or 0) + (endedAt - self.packStartedAt)
     self.packStartedAt, self.lastTickAt, self.lastEvidenceAt = nil, nil, nil
@@ -405,7 +489,7 @@ function RAT:CombatLog(...)
     if not session then return end
     local _, subevent, _, sourceGUID, sourceName, _, _, destGUID, destName = ...
     local sourceKey, sourceMember, sourceIsPet = ResolveMember(session, sourceGUID, sourceName)
-    local _, destMember = ResolveMember(session, destGUID, destName)
+    local destKey, destMember, destIsPet = ResolveMember(session, destGUID, destName)
 
     if not self.encounterActive and EVIDENCE_EVENTS[subevent] then
         local enemyGUID
@@ -440,8 +524,8 @@ function RAT:CombatLog(...)
     end
 
     if subevent == "UNIT_DIED" and self.packStartedAt then
-        if destMember then
-            local deadKey = ResolveMember(session, destGUID, destName)
+        if destMember and not destIsPet then
+            local deadKey = destKey
             if deadKey then
                 self:CreditIdle(deadKey, destMember, math.min(GetTime(), self.lastEvidenceAt or GetTime()), false)
                 self.activityAt[deadKey], self.idleCredited[deadKey] = GetTime(), nil

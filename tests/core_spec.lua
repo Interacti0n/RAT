@@ -67,6 +67,8 @@ bossVisible = false
 clock = clock + 11
 assert(RAT:SetSetting("joinGrace", 10))
 assert(not RAT:SetSetting("joinGrace", 0))
+assert(RAT:GetSessionSetting("joinGrace") == 15, "running session keeps its original limits")
+RAT:ResetCurrentSession()
 enemyHit("Creature-2")
 local secondPackStart = clock
 for _, seconds in ipairs({ 4, 8, 12 }) do

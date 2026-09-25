@@ -14,6 +14,36 @@ local function Date(value)
     return date and value and date("%Y-%m-%d %H:%M", value) or tostring(value or "?")
 end
 
+local function SettingsText(session)
+    local settings = session and session.settings
+    if not settings then return "Original limits not recorded (older session)." end
+    local text = string.format("Join %ds | action gap %ds | resurrection %ds",
+        settings.joinGrace, settings.activeGap, settings.reviveGrace)
+    if session.warnings and session.warnings.settingsUnknown then text = text .. " | Earlier limits unknown" end
+    return text
+end
+
+function RAT:GetSortedMembers(session)
+    local members = {}
+    for _, member in pairs(session.members or {}) do members[#members + 1] = member end
+    local key = self.sortBy or "percent"
+    local ascending = RAT_DB.ui.sortAscending == true
+    local function Value(member)
+        local eligible, idle, percent, longest = RAT:GetMetrics(member)
+        return ({name=member.key or member.name or "", eligible=eligible, idle=idle,
+            percent=percent, longest=longest, packs=member.packs or 0})[key] or percent
+    end
+    table.sort(members, function(a, b)
+        local av, bv = Value(a), Value(b)
+        if av ~= bv then
+            if ascending then return av < bv end
+            return av > bv
+        end
+        return (a.key or a.name or "") < (b.key or b.name or "")
+    end)
+    return members
+end
+
 local function ColorForPercent(percent)
     if percent <= 5 then return 0.25, 1, 0.35 end
     if percent <= 30 then return 1, 0.82, 0.15 end
@@ -56,14 +86,24 @@ function RAT:BuildFrame()
     if self.frame then return self.frame end
     local frame = CreateFrame("Frame", "RATMainFrame", UIParent)
     frame:SetSize(WIDTH, HEIGHT)
-    frame:SetPoint("CENTER")
+    local position = RAT_DB.ui.position
+    local anchors = {CENTER=true, TOP=true, BOTTOM=true, LEFT=true, RIGHT=true,
+        TOPLEFT=true, TOPRIGHT=true, BOTTOMLEFT=true, BOTTOMRIGHT=true}
+    if type(position) == "table" and anchors[position.point] and anchors[position.relativePoint]
+        and type(position.x) == "number" and type(position.y) == "number" then
+        frame:SetPoint(position.point, UIParent, position.relativePoint, position.x, position.y)
+    else frame:SetPoint("CENTER") end
     frame:SetFrameStrata("DIALOG")
     frame:SetMovable(true)
     frame:SetClampedToScreen(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
-    frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+    frame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local point, _, relativePoint, x, y = self:GetPoint()
+        RAT_DB.ui.position = {point=point, relativePoint=relativePoint, x=x, y=y}
+    end)
     frame:SetBackdrop({ bgFile="Interface\\DialogFrame\\UI-DialogBox-Background", edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border", edgeSize=24, insets={left=6,right=6,top=6,bottom=6} })
     frame:SetBackdropColor(0, 0, 0, 0.92)
 
@@ -84,9 +124,9 @@ function RAT:BuildFrame()
     frame.close:SetPoint("TOPRIGHT", -4, -4)
 
     local headers = {
-        { "Player", 18, 170, "LEFT" }, { "Trash time", 188, 90 },
-        { "Idle", 278, 75 }, { "Idle %", 353, 65 },
-        { "Longest", 418, 80 }, { "Packs", 498, 50 },
+        { "Player", 18, 170, "LEFT", "name" }, { "Trash time", 188, 90, "CENTER", "eligible" },
+        { "Idle", 278, 75, "CENTER", "idle" }, { "Idle %", 353, 65, "CENTER", "percent" },
+        { "Longest", 418, 80, "CENTER", "longest" }, { "Packs", 498, 50, "CENTER", "packs" },
         { "Current", 548, 140 },
     }
     frame.headers = {}
@@ -97,11 +137,25 @@ function RAT:BuildFrame()
         label:SetJustifyH(data[4] or "CENTER")
         label:SetText(data[1])
         frame.headers[#frame.headers + 1] = label
+        if data[5] then
+            local sortKey = data[5]
+            local button = CreateFrame("Button", nil, frame)
+            button:SetPoint("TOPLEFT", data[2], -86)
+            button:SetSize(data[3], 24)
+            button:SetScript("OnClick", function() RAT:SetSort(sortKey, true) end)
+            button:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_TOP")
+                GameTooltip:AddLine("Click to sort; click again to reverse")
+                GameTooltip:Show()
+            end)
+            button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            label.sortKey = sortKey
+        end
     end
 
     frame.scroll = CreateFrame("ScrollFrame", "RATRosterScrollFrame", frame, "UIPanelScrollFrameTemplate")
     frame.scroll:SetPoint("TOPLEFT", 14, -112)
-    frame.scroll:SetPoint("BOTTOMRIGHT", -34, 58)
+    frame.scroll:SetPoint("BOTTOMRIGHT", -34, 86)
     frame.content = CreateFrame("Frame", nil, frame.scroll)
     frame.content:SetSize(WIDTH - 55, 1)
     frame.scroll:SetScrollChild(frame.content)
@@ -154,15 +208,25 @@ function RAT:BuildFrame()
     frame.position:SetJustifyH("CENTER")
     frame.settings = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     frame.settings:SetSize(75, 22)
-    frame.settings:SetPoint("LEFT", frame.position, "RIGHT", 7, 0)
+    frame.settings:SetPoint("BOTTOMLEFT", 16, 48)
     frame.settings:SetText("Settings")
     frame.settings:SetScript("OnClick", function() RAT:ShowSettings() end)
     frame.export = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     frame.export:SetSize(85, 22)
-    frame.export:SetPoint("BOTTOMRIGHT", -16, 18)
+    frame.export:SetPoint("BOTTOMRIGHT", -16, 48)
     frame.export:SetText("Export")
     frame.export:SetScript("OnClick", function() RAT:ShowExport() end)
-    frame.buttons = { frame.toggle, frame.reset, frame.previous, frame.next, frame.settings, frame.export }
+    frame.csv = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    frame.csv:SetSize(85, 22)
+    frame.csv:SetPoint("RIGHT", frame.export, "LEFT", -8, 0)
+    frame.csv:SetText("CSV")
+    frame.csv:SetScript("OnClick", function() RAT:ShowCSV() end)
+    frame.packDetails = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    frame.packDetails:SetSize(100, 22)
+    frame.packDetails:SetPoint("LEFT", frame.settings, "RIGHT", 8, 0)
+    frame.packDetails:SetText("Pack details")
+    frame.packDetails:SetScript("OnClick", function() RAT:ShowPackDetails() end)
+    frame.buttons = { frame.toggle, frame.reset, frame.previous, frame.next, frame.settings, frame.export, frame.csv, frame.packDetails }
     frame.historyIndex = 1
     frame:SetScript("OnShow", function() RAT:TrySkinElvUI(); RAT:RefreshUI() end)
     if UISpecialFrames then UISpecialFrames[#UISpecialFrames + 1] = "RATMainFrame" end
@@ -215,7 +279,7 @@ local function CurrentState(member, selected)
     local started = RAT.activityAt[member.key] or now
     if reviveUntil then started = math.max(started, reviveUntil) end
     local elapsed = math.max(0, now - started)
-    local threshold = RAT.hasParticipated[member.key] and RAT:GetSetting("activeGap") or RAT:GetSetting("joinGrace")
+    local threshold = RAT.hasParticipated[member.key] and RAT:GetSessionSetting("activeGap") or RAT:GetSessionSetting("joinGrace")
     if elapsed >= threshold then return "IDLE " .. math.floor(elapsed) .. "s", 1, 0.2, 0.2 end
     if elapsed > 3 then return "Grace " .. math.ceil(threshold - elapsed) .. "s", 1, 0.82, 0.15 end
     return "Active", 0.25, 1, 0.35
@@ -225,19 +289,26 @@ function RAT:RefreshUI(preferred)
     local frame = self.frame
     if not frame then return end
     local sessions = self:GetSessions()
-    frame.note:SetText(string.format("Join %ds | action gap %ds | resurrection %ds. Click a player for intervals. /rat settings to change limits.",
-        self:GetSetting("joinGrace"), self:GetSetting("activeGap"), self:GetSetting("reviveGrace")))
     if preferred then
         for index, session in ipairs(sessions) do if session == preferred then frame.historyIndex = index end end
     end
     frame.historyIndex = math.max(1, math.min(frame.historyIndex or 1, math.max(1, #sessions)))
     local session = sessions[frame.historyIndex]
+    frame.note:SetText(session and SettingsText(session) .. ". Click headers to sort; players for intervals." or "")
+    for _, label in ipairs(frame.headers) do
+        if label.sortKey then
+            if label.sortKey == self.sortBy then label:SetTextColor(0.3, 1, 0.5)
+            else label:SetTextColor(1, 0.82, 0) end
+        end
+    end
     frame.position:SetText(#sessions > 0 and (frame.historyIndex .. " / " .. #sessions) or "0 / 0")
     frame.previous:SetEnabled(frame.historyIndex < #sessions)
     frame.next:SetEnabled(frame.historyIndex > 1)
     frame.toggle:SetText(self.activeSession and "End Session" or "Start Session")
     frame.reset:SetEnabled(self.activeSession ~= nil and session == self.activeSession)
     frame.export:SetEnabled(session ~= nil)
+    frame.csv:SetEnabled(session ~= nil)
+    frame.packDetails:SetEnabled(session ~= nil)
     if not session then
         frame.summary:SetText("No raid activity session recorded yet.")
         for _, row in ipairs(frame.rows) do row:Hide() end
@@ -247,19 +318,12 @@ function RAT:RefreshUI(preferred)
     local warnings = session.warnings or {}
     local warningText = warnings.reload and " | Resumed" or ""
     if (warnings.logGaps or 0) > 0 then warningText = warningText .. " | Log gaps " .. warnings.logGaps end
-    frame.summary:SetText(string.format("%s | %s | %s | %d packs | %s trash%s",
+    local packs, seconds, running = self:GetSessionTotals(session)
+    frame.summary:SetText(string.format("%s | %s | %s | %d packs | %s trash%s%s",
         session.instance or "Unknown", state,
         date("%m-%d %H:%M", session.startedAt or self.WallTime()),
-        session.trashPacks or 0, Duration(session.trashCombatSeconds or 0), warningText))
-    local members = {}
-    for _, member in pairs(session.members or {}) do members[#members + 1] = member end
-    table.sort(members, function(a, b)
-        local _, ai, ap = RAT:GetMetrics(a)
-        local _, bi, bp = RAT:GetMetrics(b)
-        if RAT.sortBy == "idle" and ai ~= bi then return ai > bi end
-        if RAT.sortBy ~= "name" and ap ~= bp then return ap > bp end
-        return (a.name or a.key) < (b.name or b.key)
-    end)
+        packs, Duration(seconds), running and " (includes current)" or "", warningText))
+    local members = self:GetSortedMembers(session)
     for index, member in ipairs(members) do
         local row = EnsureRow(frame, index)
         row.member = member
@@ -293,7 +357,7 @@ function RAT:ShowSettings()
     local popup = self.settingsPopup
     if not popup then
         popup = CreateFrame("Frame", "RATSettingsFrame", UIParent)
-        popup:SetSize(310, 220)
+        popup:SetSize(340, 250)
         popup:SetPoint("CENTER")
         popup:SetFrameStrata("FULLSCREEN_DIALOG")
         popup:EnableMouse(true)
@@ -304,6 +368,9 @@ function RAT:ShowSettings()
         local title = popup:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         title:SetPoint("TOPLEFT", 20, -18)
         title:SetText("RAT settings (seconds)")
+        local note = popup:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        note:SetPoint("TOPLEFT", 22, -42)
+        note:SetText("Applied when starting or resetting a session.")
         local close = CreateFrame("Button", nil, popup, "UIPanelCloseButton")
         close:SetPoint("TOPRIGHT", -4, -4)
         popup.inputs = {}
@@ -340,7 +407,7 @@ function RAT:ShowSettings()
             end
             for key, value in pairs(values) do RAT:SetSetting(key, value) end
             popup:Hide()
-            RAT:Notify("Settings saved.")
+            RAT:Notify("Settings saved for the next session or reset.")
         end)
         popup:Hide()
         if UISpecialFrames then UISpecialFrames[#UISpecialFrames + 1] = "RATSettingsFrame" end
@@ -420,8 +487,10 @@ function RAT:ShowExport()
     local session = SelectedSession()
     if not session then self:Notify("No session to export."); return end
     local lines = { "RAT - " .. (session.instance or "Unknown") .. " (" .. Date(session.startedAt) .. ")" }
-    lines[#lines + 1] = string.format("Trash packs: %d | combat: %s", session.trashPacks or 0,
-        Duration(session.trashCombatSeconds or 0))
+    local packs, seconds, running = self:GetSessionTotals(session)
+    lines[#lines + 1] = string.format("Trash packs: %d | combat: %s%s", packs,
+        Duration(seconds), running and " (includes current pack)" or "")
+    lines[#lines + 1] = SettingsText(session)
     local warnings = session.warnings or {}
     if warnings.reload then lines[#lines + 1] = "Caution: session resumed after reload; combat during reload was not observed." end
     if (warnings.logGaps or 0) > 0 then
@@ -444,6 +513,65 @@ function RAT:ShowExport()
             Duration(longest), member.packs or 0)
     end
     self:ShowText("RAT - copy report", table.concat(lines, "\n"))
+end
+
+local function CSVCell(value)
+    local text = tostring(value or "")
+    if type(value) == "string" and text:match("^%s*[=+@%-]") then text = "'" .. text end
+    return '"' .. text:gsub('"', '""') .. '"'
+end
+
+function RAT:BuildCSV(session)
+    local lines = { "instance,session_started,session_state,includes_current_pack,trash_packs,combat_seconds,join_grace,action_gap,resurrection_grace,limits_status,resumed,log_gaps,player,eligible_seconds,idle_seconds,idle_percent,longest_idle_seconds,player_packs" }
+    local packs, seconds, running = self:GetSessionTotals(session)
+    local settings, warnings = session.settings or {}, session.warnings or {}
+    for _, member in ipairs(self:GetSortedMembers(session)) do
+        local eligible, idle, percent, longest = self:GetMetrics(member)
+        local values = { session.instance or "Unknown", Date(session.startedAt),
+            session == self.activeSession and "ACTIVE" or "FINISHED", running and "yes" or "no",
+            packs, seconds, settings.joinGrace or "", settings.activeGap or "", settings.reviveGrace or "",
+            not session.settings and "unknown" or (warnings.settingsUnknown and "earlier limits unknown" or "recorded"),
+            warnings.reload and "yes" or "no", warnings.logGaps or 0, member.key or member.name or "?",
+            eligible, idle, percent, longest, member.packs or 0 }
+        for index, value in ipairs(values) do values[index] = CSVCell(value) end
+        lines[#lines + 1] = table.concat(values, ",")
+    end
+    return table.concat(lines, "\r\n")
+end
+
+function RAT:ShowCSV()
+    local session = SelectedSession()
+    if not session then self:Notify("No session to export."); return end
+    self:ShowText("RAT - copy CSV (combat-log estimate)", self:BuildCSV(session))
+end
+
+function RAT:ShowPackDetails()
+    local session = SelectedSession()
+    if not session then self:Notify("No session selected."); return end
+    local lines = { "RAT - " .. (session.instance or "Unknown") .. " - pack details", SettingsText(session),
+        "Snapshot estimated from this client's combat log." }
+    local packs = {}
+    for _, pack in ipairs(session.packDetails or {}) do packs[#packs + 1] = pack end
+    local current = session == self.activeSession and self:GetCurrentPack()
+    if current then packs[#packs + 1] = current end
+    if (session.omittedPacks or 0) > 0 then
+        lines[#lines + 1] = string.format("%d oldest pack details omitted; session totals are retained.", session.omittedPacks)
+    end
+    if #packs == 0 then lines[#lines + 1] = "No pack details recorded. Older sessions have summary totals only." end
+    for _, pack in ipairs(packs) do
+        lines[#lines + 1] = string.format("\nPack %d | %s | %s | %s", pack.number, Date(pack.startedAt),
+            Duration(pack.seconds), pack == current and "IN PROGRESS" or pack.reason or "ended")
+        local keys = {}
+        for key in pairs(pack.members) do keys[#keys + 1] = key end
+        table.sort(keys)
+        for _, key in ipairs(keys) do
+            local member = pack.members[key]
+            local idle = math.min(member.eligible, member.idle)
+            lines[#lines + 1] = string.format("%s | eligible %s | idle %s (%d%%)", key,
+                Duration(member.eligible), Duration(idle), member.eligible > 0 and math.floor(idle / member.eligible * 100 + 0.5) or 0)
+        end
+    end
+    self:ShowText("RAT - pack details", table.concat(lines, "\n"))
 end
 
 function RAT:Show()

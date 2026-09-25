@@ -1,0 +1,12 @@
+## Interface: 50400
+## Title: RAT - Raid Activity Tracker
+## Notes: Lightweight raid-trash activity and inactivity tracker.
+## Author: Interacti0n
+## Version: 0.2.0
+## SavedVariables: RAT_DB
+## OptionalDeps: ElvUI
+## DefaultState: enabled
+
+RAT_Core.lua
+RAT_UI.lua
+RAT.lua
